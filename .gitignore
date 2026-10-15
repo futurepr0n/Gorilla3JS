@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+.claudedocs/
+*.log
+.env
+OLD/
+websocket-server.js

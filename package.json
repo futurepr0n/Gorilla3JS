@@ -1,0 +1,15 @@
+{
+  "name": "gorilla3js",
+  "version": "1.0.0",
+  "main": "combined-server.js",
+  "scripts": {
+    "start": "node combined-server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.18.1"
+  },
+  "description": "Gorillas.BAS remake in Three.js with phones as motion controllers"
+}
