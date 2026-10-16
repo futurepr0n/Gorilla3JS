@@ -213,6 +213,7 @@
         let socket;
         let onSocketOpen = () => {};
         let onSocketMessage = () => {};
+        let onSocketClose = () => {};
 
         function connectWebSocket() {
             if (!canNetwork) return;
@@ -225,7 +226,7 @@
                     console.error('Bad message', err);
                 }
             };
-            socket.onclose = () => setTimeout(connectWebSocket, 2000);
+            socket.onclose = () => { onSocketClose(); setTimeout(connectWebSocket, 2000); };
             socket.onerror = (err) => console.error('WebSocket error:', err);
         }
 
@@ -995,6 +996,7 @@
                 $('qr-box').style.display = 'none';
             }
 
+            const clampNum = (v, lo, hi, dflt) => { const n = Number(v); return Number.isFinite(n) ? Math.round(Math.min(hi, Math.max(lo, n))) : dflt; };
             onSocketOpen = () => sendMessage({ type: 'game_register', gameId });
             onSocketMessage = (msg) => {
                 const i = msg.playerIndex;
@@ -1003,16 +1005,16 @@
                     $(`slot${i + 1}`).textContent = 'Phone connected';
                     $(`p${i + 1}-tag`).textContent = 'phone';
                     if (state.phase !== 'menu' && state.players[i].type !== 'cpu') state.players[i].type = 'phone';
-                    broadcastGameState();
+                    if (state.phase === 'aiming' && state.turn === i) startTurn(i); else broadcastGameState();
                 } else if (msg.type === 'player_disconnected' && (i === 0 || i === 1)) {
                     state.phones[i] = false;
                     $(`slot${i + 1}`).textContent = 'Keyboard (phone left)';
                     if (state.phase === 'aiming' && state.turn === i) startTurn(i);
                 } else if (msg.type === 'aim_update' && state.phase === 'aiming' && state.turn === i && state.players[i].type === 'phone') {
-                    state.players[i].aim.angle = Math.round(Number(msg.angle) || 45);
+                    state.players[i].aim.angle = clampNum(msg.angle, 0, 90, 45);
                     showAim();
                 } else if (msg.type === 'throw_action' && state.players[i] && state.players[i].type === 'phone') {
-                    throwBanana(i, Number(msg.angle) || 45, Number(msg.power) || 50);
+                    throwBanana(i, clampNum(msg.angle, 0, 90, 45), clampNum(msg.power, 1, 100, 50));
                 }
             };
             connectWebSocket();
@@ -1234,12 +1236,16 @@
                 get(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (err) { return null; } },
                 set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (err) { /* storage unavailable */ } }
             };
+            const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+            const isVec = (v) => Array.isArray(v) && v.length === 3 && v.every(finite);
+            const validCalib = (c) => c && finite(c.full) && c.full > SWING_START && c.full < 200
+                && Array.isArray(c.curve) && c.curve.length < 500 && c.curve.every((p) => Array.isArray(p) && finite(p[0]) && finite(p[1]));
             let mode = store.get('gorilla.mode') === 'bar' ? 'bar' : 'swing';
             let calib = store.get('gorilla.calib');
-            if (!calib || !(calib.full > SWING_START) || !Array.isArray(calib.curve)) calib = null;
+            if (!validCalib(calib)) calib = null;
             let calibrating = null;
             let aimCalib = store.get('gorilla.aim');
-            if (!aimCalib || !Array.isArray(aimCalib.flat) || !Array.isArray(aimCalib.up)) aimCalib = null;
+            if (!aimCalib || !isVec(aimCalib.flat) || !isVec(aimCalib.up)) aimCalib = null;
             let aimStep = null;
             let aimMode = store.get('gorilla.aimMode') === 'hold' ? 'hold' : 'live';
             let aiming = false;
@@ -1334,11 +1340,17 @@
                 return [-Math.cos(b) * Math.sin(g), Math.sin(b), Math.cos(b) * Math.cos(g)];
             }
 
+            function aimFrame(flat, upPose) {
+                const a = norm(flat);
+                const bp = norm(upPose.map((x, i) => x - dot(upPose, a) * a[i]));
+                const span = Math.atan2(dot(upPose, bp), dot(upPose, a));
+                return Number.isFinite(span) && Math.abs(span) > 0.5 ? { a, bp, span } : null;
+            }
+            let frame = aimCalib && aimFrame(aimCalib.flat, aimCalib.up);
+            if (!frame) aimCalib = null;
+
             function calibratedAngle(up) {
-                const a = aimCalib.flat;
-                const bp = norm(aimCalib.up.map((x, i) => x - dot(aimCalib.up, a) * a[i]));
-                const span = Math.atan2(dot(aimCalib.up, bp), dot(aimCalib.up, a));
-                return Math.atan2(dot(up, bp), dot(up, a)) / span * 90;
+                return Math.atan2(dot(up, frame.bp), dot(up, frame.a)) / frame.span * 90;
             }
 
             function averageUp() {
@@ -1347,6 +1359,7 @@
             }
 
             $('aim-button').addEventListener('click', () => {
+                if (charging) return;
                 if (!aimStep) { aimStep = 'flat'; setMode(); return; }
                 const up = averageUp();
                 if (!up) { $('aim-status').textContent = 'No orientation data — enable motion first'; return; }
@@ -1354,13 +1367,14 @@
                     aimFlat = up;
                     aimStep = 'up';
                 } else {
-                    const span = Math.acos(Math.min(1, Math.max(-1, dot(aimFlat, up)))) * 180 / Math.PI;
-                    if (span < 30) {
+                    const next = aimFrame(aimFlat, up);
+                    if (!next) {
                         aimStep = 'flat';
                         setMode();
                         $('aim-status').textContent = 'Poses too similar — start again: FLAT forward, then tap';
                         return;
                     }
+                    frame = next;
                     aimCalib = { flat: aimFlat, up };
                     store.set('gorilla.aim', aimCalib);
                     aimStep = null;
@@ -1377,22 +1391,26 @@
             }));
 
             const aimHold = $('aim-hold');
+            let aimPointer = null;
             aimHold.addEventListener('pointerdown', (e) => {
                 e.preventDefault();
-                if (charging) return;
-                aimHold.setPointerCapture(e.pointerId);
+                if (charging || aiming || !motion.tilt) return;
+                aimPointer = e.pointerId;
+                try { aimHold.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported */ }
                 aiming = true;
                 aimHold.classList.add('charging');
                 if (navigator.vibrate) navigator.vibrate(20);
             });
-            const endAim = () => {
-                if (!aiming) return;
+            const endAim = (e) => {
+                if (!aiming || (e && e.pointerId !== aimPointer)) return;
                 aiming = false;
+                aimPointer = null;
                 aimHold.classList.remove('charging');
                 if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
             };
             aimHold.addEventListener('pointerup', endAim);
             aimHold.addEventListener('pointercancel', endAim);
+            aimHold.addEventListener('lostpointercapture', endAim);
             aimHold.addEventListener('contextmenu', (e) => e.preventDefault());
 
             document.querySelectorAll('#mode-toggle button').forEach((b) => b.addEventListener('click', () => {
@@ -1403,6 +1421,7 @@
             }));
 
             $('calib-button').addEventListener('click', () => {
+                if (charging) return;
                 calibrating = calibrating ? null : { peaks: [], curves: [] };
                 swing = null;
                 setMode();
@@ -1477,22 +1496,26 @@
 
             angleSlider.addEventListener('input', () => setAngle(Number(angleSlider.value)));
 
+            let smoothAngle = 45;
             function onOrientation(e) {
-                if (e.beta === null) return;
+                if (!Number.isFinite(e.beta)) return;
+                const gamma = Number.isFinite(e.gamma) ? e.gamma : 0;
                 const landscape = Math.abs((screen.orientation && screen.orientation.angle) || window.orientation || 0) === 90;
-                const up = upVector(e.beta, e.gamma || 0);
+                const up = upVector(e.beta, gamma);
                 recentUps.push(up);
                 if (recentUps.length > 8) recentUps.shift();
-                const raw = aimCalib ? calibratedAngle(up) : landscape ? 90 - Math.abs(e.gamma) : e.beta;
+                const raw = aimCalib ? calibratedAngle(up) : landscape ? 90 - Math.abs(gamma) : e.beta;
+                if (!Number.isFinite(raw)) return;
                 if (!motion.tilt) { motion.tilt = true; setMode(); }
-                const k = charging ? 0.8 : 0.3;
-                const holdAim = aimMode === 'hold';
-                if (lockedAngle === null && (!holdAim || aiming)) setAngle(angle * (1 - k) + raw * k);
+                if (lockedAngle !== null || (aimMode === 'hold' && !aiming)) { smoothAngle = angle; return; }
+                const k = charging || aiming ? 0.8 : 0.3;
+                smoothAngle = smoothAngle * (1 - k) + Math.min(90, Math.max(0, raw)) * k;
+                setAngle(smoothAngle);
             }
 
             function onMotion(e) {
                 const a = e.acceleration;
-                if (!a || a.x === null) return;
+                if (!a || !Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(a.z)) return;
                 if (!motion.swing) { motion.swing = true; setMode(); }
                 if (!swingMode()) return;
                 const m = Math.hypot(a.x, a.y, a.z);
@@ -1524,9 +1547,10 @@
                 const needsPermission = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
                 try {
                     if (needsPermission) {
+                        const orient = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
                         const results = await Promise.all([
                             DeviceMotionEvent.requestPermission(),
-                            DeviceOrientationEvent.requestPermission()
+                            orient ? DeviceOrientationEvent.requestPermission() : 'granted'
                         ]);
                         if (results.some((r) => r !== 'granted')) {
                             gameStatus.textContent = 'Motion permission denied — using touch controls.';
@@ -1549,10 +1573,12 @@
                 sendMessage({ type: 'aim', gameId: gameIdParam, playerId, angle });
             }, 80);
 
+            let throwPointer = null;
             function startCharging(e) {
                 e.preventDefault();
-                if (!isMyTurn || charging) return;
-                throwButton.setPointerCapture(e.pointerId);
+                if (!isMyTurn || charging || calibrating || aimStep) return;
+                throwPointer = e.pointerId;
+                try { throwButton.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported */ }
                 charging = true;
                 endAim();
                 lockedAngle = swingMode() && motion.tilt && aimMode === 'live' ? null : angle;
@@ -1570,35 +1596,42 @@
                 }, 30);
             }
 
-            function stopCharging(send) {
-                if (!charging) return;
+            function stopCharging(send, e) {
+                if (!charging || (e && e.pointerId !== throwPointer)) return;
                 clearInterval(chargeTimer);
                 charging = false;
+                throwPointer = null;
                 const throwAngle = lockedAngle === null ? angle : lockedAngle;
                 lockedAngle = null;
                 throwButton.classList.remove('charging');
-                if (!send || chargePower < 3) {
+                if (!send || chargePower < 3 || !isMyTurn) {
                     setPower(0);
-                    if (send) gameStatus.textContent = swingMode() ? 'No swing detected — hold the button and swing.' : 'Hold the button a little longer.';
+                    if (send && isMyTurn) gameStatus.textContent = swingMode() ? 'No swing detected — hold the button and swing.' : 'Hold the button a little longer.';
                     return;
                 }
                 if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
-                sendMessage({ type: 'throw', gameId: gameIdParam, playerId, power: chargePower, angle: throwAngle });
+                sendMessage({ type: 'throw', gameId: gameIdParam, playerId, power: Math.round(chargePower), angle: throwAngle });
                 isMyTurn = false;
                 throwButton.disabled = true;
                 gameStatus.textContent = `Banana away! ${throwAngle}° · power ${Math.round(chargePower)}`;
             }
 
             throwButton.addEventListener('pointerdown', startCharging);
-            throwButton.addEventListener('pointerup', () => stopCharging(true));
-            throwButton.addEventListener('pointercancel', () => stopCharging(false));
+            throwButton.addEventListener('pointerup', (e) => stopCharging(true, e));
+            throwButton.addEventListener('pointercancel', (e) => stopCharging(false, e));
+            throwButton.addEventListener('lostpointercapture', (e) => stopCharging(false, e));
             throwButton.addEventListener('contextmenu', (e) => e.preventDefault());
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) { stopCharging(false); endAim(); }
+            });
 
             function updateGameState(s) {
                 const justHit = reactToHit(s.hit);
                 gotFirstState = true;
                 const wasMyTurn = isMyTurn;
                 isMyTurn = !!s.isYourTurn;
+                const cancelled = !isMyTurn && charging;
+                if (cancelled) stopCharging(false);
                 throwButton.disabled = !isMyTurn;
                 gameStatus.classList.toggle('your-turn', isMyTurn);
                 if (!s.gameStarted) {
@@ -1607,7 +1640,7 @@
                 }
                 const wind = Number(s.wind) || 0;
                 const windText = `Wind ${wind > 0 ? '→' : wind < 0 ? '←' : ''} ${Math.abs(wind).toFixed(1)}`;
-                if (!justHit) gameStatus.textContent = isMyTurn ? `YOUR TURN · ${windText}` : `Opponent's turn · ${windText}`;
+                if (!justHit) gameStatus.textContent = isMyTurn ? `YOUR TURN · ${windText}` : `${cancelled ? 'Turn ended before you threw' : "Opponent's turn"} · ${windText}`;
                 if (isMyTurn && !wasMyTurn) {
                     lastSentAngle = null;
                     if (navigator.vibrate) navigator.vibrate([80, 60, 80]);
@@ -1621,6 +1654,14 @@
             if (!calib) $('calib-status').textContent = 'Not calibrated — tap to set your full swing';
 
             onSocketOpen = () => sendMessage({ type: 'controller_connect', gameId: gameIdParam, playerId });
+            onSocketClose = () => {
+                stopCharging(false);
+                endAim();
+                isMyTurn = false;
+                throwButton.disabled = true;
+                gameStatus.classList.remove('your-turn');
+                gameStatus.textContent = 'Connection lost — reconnecting…';
+            };
             onSocketMessage = (msg) => {
                 if (msg.type === 'controller_connected') {
                     myIndex = msg.playerIndex;

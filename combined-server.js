@@ -198,6 +198,24 @@ function handleControllerConnect(ws, data) {
             type: 'controller_connected',
             playerIndex: playerIndex
         }));
+        ws.send(JSON.stringify({
+            type: 'game_state',
+            state: {
+                gameStarted: game.state.gameStarted,
+                isYourTurn: playerIndex === game.state.currentTurn,
+                scores: game.state.scores,
+                wind: game.state.wind,
+                hit: null
+            }
+        }));
+        
+        if (game.gameScreen && game.gameScreen.readyState === WebSocket.OPEN) {
+            game.gameScreen.send(JSON.stringify({
+                type: 'player_connected',
+                playerIndex: playerIndex,
+                playerId: playerId
+            }));
+        }
         
         console.log(`Player ${playerId} reconnected to game ${gameId} as player ${playerIndex + 1}`);
     } else if (game.players.length < 2) {
@@ -256,7 +274,9 @@ function handleAim(ws, data) {
 }
 
 function handleThrow(ws, data) {
-    const { gameId, playerId, angle, power, velocity } = data;
+    const { gameId, playerId, velocity } = data;
+    const angle = Number(data.angle);
+    const power = Number(data.power);
     
     // Check if game exists
     if (!games.has(gameId)) {
@@ -279,14 +299,18 @@ function handleThrow(ws, data) {
         sendError(ws, 'Not your turn');
         return;
     }
+    if (!Number.isFinite(angle) || !Number.isFinite(power)) {
+        sendError(ws, 'Invalid throw');
+        return;
+    }
     
     // Forward throw to game screen
     if (game.gameScreen && game.gameScreen.readyState === WebSocket.OPEN) {
         game.gameScreen.send(JSON.stringify({
             type: 'throw_action',
             playerIndex: playerIndex,
-            angle: angle,
-            power: power,
+            angle: Math.min(90, Math.max(0, angle)),
+            power: Math.min(100, Math.max(1, power)),
             velocity: velocity
         }));
         
