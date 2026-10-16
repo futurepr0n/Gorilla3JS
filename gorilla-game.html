@@ -130,6 +130,12 @@
             margin-top: auto; height: 120px; border: none; border-radius: 18px; font-family: var(--pixel); font-size: 13px;
             background: var(--accent); color: #1a1300; box-shadow: 0 6px 0 #a07a00; touch-action: none;
         }
+        .throw-row { margin-top: auto; display: grid; grid-template-columns: 1fr; gap: 12px; }
+        .throw-row .throw-button { margin-top: 0; width: 100%; }
+        .throw-row .aim-hold { display: none; background: #2b3366; color: var(--ink); box-shadow: 0 6px 0 #161b3d; }
+        .throw-row.two { grid-template-columns: 1fr 1fr; }
+        .throw-row.two .aim-hold { display: block; }
+        #aim-toggle button { font-size: 8px; }
         .throw-button.charging { background: #ff5d5d; box-shadow: 0 2px 0 #8a1f1f; transform: translateY(4px); }
         .throw-button:disabled { opacity: .35; }
         #debug-info { font-size: 11px; color: var(--muted); text-align: center; }
@@ -141,6 +147,12 @@
         body.flash-bad .controller { animation: flash-bad .9s ease-out; }
         @keyframes flash-good { from { background: #1f8a3a; } }
         @keyframes flash-bad { from { background: #a3241f; } }
+        .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: rgba(255,255,255,.05); padding: 4px; border-radius: 12px; }
+        .seg button { font-family: var(--pixel); font-size: 10px; padding: 12px 6px; border: none; border-radius: 9px; background: transparent; color: var(--muted); }
+        .seg button.on { background: var(--accent); color: #1a1300; }
+        #swing-graph { width: 100%; height: 90px; display: block; background: rgba(255,255,255,.04); border-radius: 10px; }
+        .swing-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+        .swing-row .btn { width: auto; margin: 0; padding: 10px 12px; font-size: 9px; }
         .c-help { margin: 0; font-size: 13px; color: var(--muted); text-align: center; }
         #motion-button { margin-top: 0; }
     </style>
@@ -1164,12 +1176,34 @@
                         <div class="tilt-gauge"><div class="tilt-needle" id="tilt-needle"></div></div>
                         <input type="range" id="angle-slider" min="0" max="90" value="45" step="1">
                     </div>
+                    <div class="seg" id="mode-toggle">
+                        <button data-mode="swing">SWING</button>
+                        <button data-mode="bar">POWER BAR</button>
+                    </div>
+                    <div class="seg" id="aim-toggle">
+                        <button data-aim="live">AIM: LIVE TILT</button>
+                        <button data-aim="hold">AIM: HOLD TO AIM</button>
+                    </div>
                     <div class="c-row">
                         <label>POWER <span id="power-value">0</span></label>
                         <div class="power-meter"><div class="power-fill" id="power-fill"></div></div>
                     </div>
-                    <p class="c-help" id="help">Tilt the phone to aim. Hold the button, swing the phone like a throw, and let go.</p>
-                    <button class="throw-button" id="throw-button" disabled>HOLD + SWING<br><br>RELEASE TO THROW</button>
+                    <div id="swing-panel">
+                        <canvas id="swing-graph"></canvas>
+                        <div class="swing-row">
+                            <span id="calib-status">Not calibrated</span>
+                            <button class="btn secondary" id="calib-button">CALIBRATE</button>
+                        </div>
+                        <div class="swing-row">
+                            <span id="aim-status">Aim not calibrated</span>
+                            <button class="btn secondary" id="aim-button">CALIBRATE AIM</button>
+                        </div>
+                    </div>
+                    <p class="c-help" id="help"></p>
+                    <div class="throw-row" id="throw-row">
+                        <button class="throw-button aim-hold" id="aim-hold">HOLD<br><br>TO AIM</button>
+                        <button class="throw-button" id="throw-button" disabled></button>
+                    </div>
                     <div id="debug-info"></div>
                 </div>
             `;
@@ -1194,7 +1228,25 @@
                 return;
             }
 
-            const SWING_FULL = 28;
+            const SWING_START = 6;
+            const GRAPH_MS = 1500;
+            const store = {
+                get(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (err) { return null; } },
+                set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (err) { /* storage unavailable */ } }
+            };
+            let mode = store.get('gorilla.mode') === 'bar' ? 'bar' : 'swing';
+            let calib = store.get('gorilla.calib');
+            if (!calib || !(calib.full > SWING_START) || !Array.isArray(calib.curve)) calib = null;
+            let calibrating = null;
+            let aimCalib = store.get('gorilla.aim');
+            if (!aimCalib || !Array.isArray(aimCalib.flat) || !Array.isArray(aimCalib.up)) aimCalib = null;
+            let aimStep = null;
+            let aimMode = store.get('gorilla.aimMode') === 'hold' ? 'hold' : 'live';
+            let aiming = false;
+            let aimFlat = null;
+            const recentUps = [];
+            let swing = null;
+            const samples = [];
             let isMyTurn = false;
             let charging = false;
             let chargePower = 0;
@@ -1240,36 +1292,221 @@
                 $('power-value').textContent = Math.round(chargePower);
             }
 
+            const swingMode = () => mode === 'swing' && motion.swing;
+            const swingFull = () => (calib ? calib.full : 28);
+
             function setMode() {
                 angleSlider.style.display = motion.tilt ? 'none' : '';
                 $('tilt-needle').parentElement.style.display = motion.tilt ? '' : 'none';
                 motionButton.style.display = motion.tilt && motion.swing ? 'none' : '';
-                $('help').textContent = motion.swing
-                    ? 'Tilt the phone to aim. Hold the button, swing the phone like a throw, and let go.'
-                    : motion.tilt
-                        ? 'Tilt to aim. Hold the button and release when the power bar is right.'
-                        : 'Drag the slider to aim. Hold the button and release when the power bar is right.';
+                $('mode-toggle').style.display = motion.swing ? '' : 'none';
+                const holdAim = aimMode === 'hold' && motion.tilt;
+                $('aim-toggle').style.display = motion.tilt ? '' : 'none';
+                document.querySelectorAll('#aim-toggle button').forEach((b) => b.classList.toggle('on', b.dataset.aim === aimMode));
+                $('throw-row').classList.toggle('two', holdAim);
+                $('swing-panel').style.display = swingMode() ? '' : 'none';
+                document.querySelectorAll('#mode-toggle button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+                const aim = motion.tilt ? 'Tilt the phone to aim.' : 'Drag the slider to aim.';
+                const power = swingMode() ? 'hold THROW, swing, and let go at the top' : 'hold THROW and release when the power bar is right';
+                $('help').textContent = holdAim
+                    ? `Hold AIM and tilt to set the angle — it locks when you let go. Then ${power}.`
+                    : swingMode()
+                        ? 'Hold the button at your start position, swing, and let go at the top. The phone\'s angle when you let go is the throw angle.'
+                        : `${aim} Hold the button and release when the power bar is right.`;
+                throwButton.innerHTML = swingMode() ? (holdAim ? 'THROW<br><br>HOLD + SWING' : 'HOLD + SWING') : 'HOLD TO CHARGE<br><br>RELEASE TO THROW';
+                $('calib-status').textContent = calibrating
+                    ? `Full-power swing ${calibrating.peaks.length + 1} of 3…`
+                    : calib ? `Calibrated · full power = ${calib.full.toFixed(0)} m/s²` : 'Not calibrated — tap to set your full swing';
+                $('calib-button').textContent = calibrating ? 'CANCEL' : calib ? 'RECALIBRATE' : 'CALIBRATE';
+                $('aim-status').textContent = aimStep === 'flat'
+                    ? 'Hold your release grip pointing FLAT forward, then tap'
+                    : aimStep === 'up'
+                        ? 'Now point it STRAIGHT UP (a lob), then tap'
+                        : aimCalib ? 'Aim calibrated to your grip' : 'Aim not calibrated';
+                $('aim-button').textContent = aimStep ? 'CAPTURE' : aimCalib ? 'RECALIBRATE AIM' : 'CALIBRATE AIM';
             }
+
+            const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            const norm = (v) => { const l = Math.hypot(...v) || 1; return v.map((x) => x / l); };
+
+            function upVector(beta, gamma) {
+                const b = beta * Math.PI / 180, g = gamma * Math.PI / 180;
+                return [-Math.cos(b) * Math.sin(g), Math.sin(b), Math.cos(b) * Math.cos(g)];
+            }
+
+            function calibratedAngle(up) {
+                const a = aimCalib.flat;
+                const bp = norm(aimCalib.up.map((x, i) => x - dot(aimCalib.up, a) * a[i]));
+                const span = Math.atan2(dot(aimCalib.up, bp), dot(aimCalib.up, a));
+                return Math.atan2(dot(up, bp), dot(up, a)) / span * 90;
+            }
+
+            function averageUp() {
+                if (!recentUps.length) return null;
+                return norm([0, 1, 2].map((i) => recentUps.reduce((sum, u) => sum + u[i], 0)));
+            }
+
+            $('aim-button').addEventListener('click', () => {
+                if (!aimStep) { aimStep = 'flat'; setMode(); return; }
+                const up = averageUp();
+                if (!up) { $('aim-status').textContent = 'No orientation data — enable motion first'; return; }
+                if (aimStep === 'flat') {
+                    aimFlat = up;
+                    aimStep = 'up';
+                } else {
+                    const span = Math.acos(Math.min(1, Math.max(-1, dot(aimFlat, up)))) * 180 / Math.PI;
+                    if (span < 30) {
+                        aimStep = 'flat';
+                        setMode();
+                        $('aim-status').textContent = 'Poses too similar — start again: FLAT forward, then tap';
+                        return;
+                    }
+                    aimCalib = { flat: aimFlat, up };
+                    store.set('gorilla.aim', aimCalib);
+                    aimStep = null;
+                }
+                if (navigator.vibrate) navigator.vibrate(50);
+                setMode();
+            });
+
+            document.querySelectorAll('#aim-toggle button').forEach((b) => b.addEventListener('click', () => {
+                if (charging) return;
+                aimMode = b.dataset.aim;
+                store.set('gorilla.aimMode', aimMode);
+                setMode();
+            }));
+
+            const aimHold = $('aim-hold');
+            aimHold.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                if (charging) return;
+                aimHold.setPointerCapture(e.pointerId);
+                aiming = true;
+                aimHold.classList.add('charging');
+                if (navigator.vibrate) navigator.vibrate(20);
+            });
+            const endAim = () => {
+                if (!aiming) return;
+                aiming = false;
+                aimHold.classList.remove('charging');
+                if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
+            };
+            aimHold.addEventListener('pointerup', endAim);
+            aimHold.addEventListener('pointercancel', endAim);
+            aimHold.addEventListener('contextmenu', (e) => e.preventDefault());
+
+            document.querySelectorAll('#mode-toggle button').forEach((b) => b.addEventListener('click', () => {
+                if (charging) return;
+                mode = b.dataset.mode;
+                store.set('gorilla.mode', mode);
+                setMode();
+            }));
+
+            $('calib-button').addEventListener('click', () => {
+                calibrating = calibrating ? null : { peaks: [], curves: [] };
+                swing = null;
+                setMode();
+            });
+
+            function trackSwing(m, t) {
+                if (!swing) {
+                    if (m < SWING_START) return null;
+                    swing = { peak: m, t0: t, curve: [], quiet: 0 };
+                }
+                swing.curve.push([Math.round(t - swing.t0), +m.toFixed(2)]);
+                if (m > swing.peak) { swing.peak = m; swing.quiet = 0; return null; }
+                swing.quiet = m < Math.max(3, swing.peak * 0.3) ? swing.quiet + 1 : 0;
+                if (swing.quiet < 3 && t - swing.t0 < 1200) return null;
+                const done = swing;
+                swing = null;
+                return done;
+            }
+
+            function onCalibrationSwing(s) {
+                if (s.peak < SWING_START * 1.5) return;
+                calibrating.peaks.push(s.peak);
+                calibrating.curves.push(s.curve);
+                if (navigator.vibrate) navigator.vibrate(50);
+                if (calibrating.peaks.length < 3) { setMode(); return; }
+                const order = calibrating.peaks.map((p, i) => [p, i]).sort((a, b) => a[0] - b[0]);
+                const [full, mid] = order[1];
+                calib = { full, curve: calibrating.curves[mid] };
+                store.set('gorilla.calib', calib);
+                calibrating = null;
+                if (navigator.vibrate) navigator.vibrate([60, 40, 160]);
+                setMode();
+            }
+
+            function drawGraph() {
+                requestAnimationFrame(drawGraph);
+                if (!swingMode()) return;
+                const cv = $('swing-graph');
+                const w = cv.clientWidth, h = cv.clientHeight;
+                if (cv.width !== w * 2) { cv.width = w * 2; cv.height = h * 2; }
+                const ctx = cv.getContext('2d');
+                ctx.setTransform(2, 0, 0, 2, 0, 0);
+                ctx.clearRect(0, 0, w, h);
+                const top = swingFull() * 1.3;
+                const y = (m) => h - 4 - Math.min(m / top, 1) * (h - 8);
+                ctx.strokeStyle = 'rgba(255,213,74,.5)';
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath(); ctx.moveTo(0, y(swingFull())); ctx.lineTo(w, y(swingFull())); ctx.stroke();
+                if (calib) {
+                    ctx.strokeStyle = 'rgba(127,219,255,.6)';
+                    ctx.beginPath();
+                    calib.curve.forEach(([dt, m], i) => {
+                        const x = w * 0.35 + dt / GRAPH_MS * w;
+                        if (i) ctx.lineTo(x, y(m)); else ctx.moveTo(x, y(m));
+                    });
+                    ctx.stroke();
+                }
+                ctx.setLineDash([]);
+                const now = performance.now();
+                while (samples.length && now - samples[0][0] > GRAPH_MS) samples.shift();
+                ctx.strokeStyle = charging || calibrating ? '#ffd54a' : 'rgba(233,236,255,.5)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                samples.forEach(([t, m], i) => {
+                    const x = w - (now - t) / GRAPH_MS * w;
+                    if (i) ctx.lineTo(x, y(m)); else ctx.moveTo(x, y(m));
+                });
+                ctx.stroke();
+                ctx.lineWidth = 1;
+            }
+            requestAnimationFrame(drawGraph);
 
             angleSlider.addEventListener('input', () => setAngle(Number(angleSlider.value)));
 
             function onOrientation(e) {
                 if (e.beta === null) return;
                 const landscape = Math.abs((screen.orientation && screen.orientation.angle) || window.orientation || 0) === 90;
-                const raw = landscape ? 90 - Math.abs(e.gamma) : e.beta;
+                const up = upVector(e.beta, e.gamma || 0);
+                recentUps.push(up);
+                if (recentUps.length > 8) recentUps.shift();
+                const raw = aimCalib ? calibratedAngle(up) : landscape ? 90 - Math.abs(e.gamma) : e.beta;
                 if (!motion.tilt) { motion.tilt = true; setMode(); }
-                if (lockedAngle === null) setAngle(angle * 0.7 + raw * 0.3);
+                const k = charging ? 0.8 : 0.3;
+                const holdAim = aimMode === 'hold';
+                if (lockedAngle === null && (!holdAim || aiming)) setAngle(angle * (1 - k) + raw * k);
             }
 
             function onMotion(e) {
                 const a = e.acceleration;
                 if (!a || a.x === null) return;
                 if (!motion.swing) { motion.swing = true; setMode(); }
-                if (!charging) return;
+                if (!swingMode()) return;
                 const m = Math.hypot(a.x, a.y, a.z);
-                if (m > peak) {
-                    peak = m;
-                    setPower(peak / SWING_FULL * 100);
+                const t = performance.now();
+                samples.push([t, m]);
+                if (!charging && !calibrating) return;
+                const done = trackSwing(m, t);
+                if (calibrating) {
+                    if (done) onCalibrationSwing(done);
+                    return;
+                }
+                if (swing && swing.peak > peak) {
+                    peak = swing.peak;
+                    setPower(peak / swingFull() * 100);
                 }
             }
 
@@ -1317,12 +1554,14 @@
                 if (!isMyTurn || charging) return;
                 throwButton.setPointerCapture(e.pointerId);
                 charging = true;
-                lockedAngle = angle;
+                endAim();
+                lockedAngle = swingMode() && motion.tilt && aimMode === 'live' ? null : angle;
                 peak = 0;
+                swing = null;
                 setPower(0);
                 throwButton.classList.add('charging');
                 if (navigator.vibrate) navigator.vibrate(40);
-                if (motion.swing) return;
+                if (swingMode()) return;
                 chargeDir = 1;
                 chargeTimer = setInterval(() => {
                     let p = chargePower + chargeDir * 1.6;
@@ -1335,12 +1574,12 @@
                 if (!charging) return;
                 clearInterval(chargeTimer);
                 charging = false;
-                const throwAngle = lockedAngle;
+                const throwAngle = lockedAngle === null ? angle : lockedAngle;
                 lockedAngle = null;
                 throwButton.classList.remove('charging');
                 if (!send || chargePower < 3) {
                     setPower(0);
-                    if (send) gameStatus.textContent = 'Swing harder! Hold, swing, release.';
+                    if (send) gameStatus.textContent = swingMode() ? 'No swing detected — hold the button and swing.' : 'Hold the button a little longer.';
                     return;
                 }
                 if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
@@ -1379,6 +1618,7 @@
 
             setAngle(45);
             setMode();
+            if (!calib) $('calib-status').textContent = 'Not calibrated — tap to set your full swing';
 
             onSocketOpen = () => sendMessage({ type: 'controller_connect', gameId: gameIdParam, playerId });
             onSocketMessage = (msg) => {
