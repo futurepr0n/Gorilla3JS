@@ -77,8 +77,10 @@ wss.on('connection', (ws, req) => {
         try {
             // Ensure proper parsing of the message
             const messageStr = message.toString();
+            const parsed = JSON.parse(messageStr);
+            if (parsed && games.has(parsed.gameId)) games.get(parsed.gameId).lastActive = Date.now();
             
-            const data = JSON.parse(messageStr);
+            const data = parsed;
             
             switch (data.type) {
                 case 'game_register':
@@ -138,6 +140,7 @@ function handleGameRegister(ws, data) {
         games.set(gameId, {
             gameScreen: ws,
             players: [],
+            lastActive: Date.now(),
             state: {
                 gameStarted: false,
                 currentTurn: 0,
@@ -302,9 +305,13 @@ function handleGameStateUpdate(ws, data) {
     }
     
     const game = games.get(gameId);
+    if (game.gameScreen !== ws || !state || typeof state !== 'object') return;
     
     // Update game state
     game.state = state;
+    const hit = state.hit && Number.isInteger(state.hit.id)
+        ? { id: state.hit.id, scorer: Number(state.hit.scorer), victim: Number(state.hit.victim) }
+        : null;
     
     // Broadcast to all controllers
     for (const player of game.players) {
@@ -315,7 +322,8 @@ function handleGameStateUpdate(ws, data) {
                     gameStarted: state.gameStarted,
                     isYourTurn: player.index === state.currentTurn,
                     scores: state.scores,
-                    wind: state.wind
+                    wind: state.wind,
+                    hit: hit
                 }
             }));
         }
@@ -372,6 +380,20 @@ function sendError(ws, message) {
 }
 
 // Start the server
+const IDLE_GAME_MS = 10 * 60 * 1000;
+const isOpen = (sock) => sock && sock.readyState === WebSocket.OPEN;
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [gameId, game] of games) {
+        const connected = isOpen(game.gameScreen) || game.players.some(p => isOpen(p.ws));
+        if (!connected && now - game.lastActive > IDLE_GAME_MS) {
+            games.delete(gameId);
+            console.log(`Removed idle game ${gameId}`);
+        }
+    }
+}, 60 * 1000).unref();
+
 server.listen(PORT, () => {
     console.log(`Server is now running on port ${PORT}`);
 });

@@ -137,6 +137,10 @@
             border-radius: 90px 90px 0 0; background: rgba(255,255,255,.06); border: 1px solid var(--edge); border-bottom: none; }
         .tilt-needle { position: absolute; left: 50%; bottom: 0; width: 80px; height: 4px; margin-left: 0;
             background: var(--accent); border-radius: 2px; transform-origin: 0 50%; transition: transform .08s linear; }
+        body.flash-good .controller { animation: flash-good .9s ease-out; }
+        body.flash-bad .controller { animation: flash-bad .9s ease-out; }
+        @keyframes flash-good { from { background: #1f8a3a; } }
+        @keyframes flash-bad { from { background: #a3241f; } }
         .c-help { margin: 0; font-size: 13px; color: var(--muted); text-align: center; }
         #motion-button { margin-top: 0; }
     </style>
@@ -232,6 +236,7 @@
                 STEP: 1 / 120, BLAST: 3.4
             };
             const X0 = -CFG.COLS * CFG.CW / 2;
+            const GS = 1.45;
             const CITY_HALF = -X0;
             const PLAYER_COLORS = [0x7fdbff, 0xffb36b];
             const BUILDING_COLORS = [0xa8423f, 0x3a9ea3, 0x9a9cab, 0x8a6bb0];
@@ -516,7 +521,7 @@
                     const g = gorillas[i];
                     g.position.set(X0 + (col + 0.5) * CFG.CW - (b.w % 2 ? 0 : CFG.CW / 2), b.h * CFG.CH, 0);
                     g.visible = true;
-                    g.scale.setScalar(1);
+                    g.scale.setScalar(GS);
                     g.userData.alive = true;
                     g.userData.anim = null;
                 });
@@ -557,7 +562,7 @@
 
             function hitsGorilla(k, x, y) {
                 const g = gorillas[k];
-                return g.userData.alive && Math.abs(x - g.position.x) < 1.9 && y > g.position.y && y < g.position.y + 4.6;
+                return g.userData.alive && Math.abs(x - g.position.x) < 1.9 * GS && y > g.position.y && y < g.position.y + 4.6 * GS;
             }
 
             // ---------- Banana, trails, aim ----------
@@ -700,7 +705,7 @@
                 const speed = THREE.MathUtils.clamp(power, 0, 100) / 100 * CFG.MAX_SPEED;
                 return {
                     owner: i, t: 0,
-                    x: g.position.x + dir * 1.6, y: g.position.y + 5.2,
+                    x: g.position.x + dir * 1.6 * GS, y: g.position.y + 5.2 * GS,
                     vx: dir * speed * Math.cos(rad), vy: speed * Math.sin(rad)
                 };
             }
@@ -723,7 +728,7 @@
             function simulate(i, angle, power) {
                 const b = launchState(i, angle, power);
                 let hit = null;
-                while (!hit) hit = stepBanana(b, 1 / 60);
+                while (!hit) hit = stepBanana(b, CFG.STEP);
                 return { hit, x: b.x, y: b.y };
             }
 
@@ -761,14 +766,14 @@
                     sfx.explode();
                 }
                 const cpu = state.players[b.owner];
-                if (cpu.type === 'cpu') cpu.err *= 0.55;
+                if (cpu.type === 'cpu') cpu.err *= 0.45;
                 state.roundTimer = setTimeout(() => startTurn(1 - b.owner), 900);
             }
 
             function gorillaInBlast(x, y) {
                 for (let k = 0; k < 2; k++) {
                     const g = gorillas[k];
-                    if (Math.hypot(x - g.position.x, y - (g.position.y + 2.3)) < CFG.BLAST + 0.8) return k;
+                    if (Math.hypot(x - g.position.x, y - (g.position.y + 2.3 * GS)) < CFG.BLAST + 0.8 * GS) return k;
                 }
                 return null;
             }
@@ -778,11 +783,12 @@
                 const scorer = victim === thrower ? 1 - thrower : thrower;
                 g.userData.alive = false;
                 g.visible = false;
-                explode(g.position.x, g.position.y + 2.3, 2);
+                explode(g.position.x, g.position.y + 2.3 * GS, 2);
                 carve(g.position.x, g.position.y + 1, CFG.BLAST * 1.6);
                 sfx.bigExplode();
                 shake = 2;
                 state.scores[scorer]++;
+                state.hit = { id: (state.hit ? state.hit.id : 0) + 1, scorer, victim };
                 updateScores();
                 playAnim(gorillas[scorer], 'dance', 2.6);
                 setTimeout(() => sfx.victory(), 600);
@@ -861,7 +867,7 @@
                 const target = 1 - i;
                 let best = null;
                 for (const angle of [45, 52, 60, 68, 38, 75, 30]) {
-                    for (let power = 15; power <= 100; power += 0.5) {
+                    for (let power = 15; power <= 100; power += 0.25) {
                         const r = simulate(i, angle, power);
                         if (r.hit.type === 'gorilla' && r.hit.who === target) { best = { angle, power }; break; }
                         const miss = Math.abs(r.x - gorillas[target].position.x);
@@ -930,7 +936,8 @@
                         gameStarted: state.phase !== 'menu',
                         currentTurn: state.phase === 'aiming' ? state.turn : -1,
                         scores: state.scores,
-                        wind: state.wind
+                        wind: state.wind,
+                        hit: state.hit
                     }
                 });
             }
@@ -1004,7 +1011,10 @@
                 camera.aspect = aspect;
                 const tanHalf = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
                 const dist = Math.max((CITY_HALF + 6) / (tanHalf * aspect), 34 / tanHalf);
-                camBase.set(0, 34, dist);
+                const lookY = Math.max(26, dist * tanHalf - 6);
+                camTarget.set(0, lookY, 0);
+                camBase.set(0, lookY + 8, dist);
+                moon.position.y = Math.max(80, lookY * 1.6);
                 scene.fog.near = dist + 20;
                 scene.fog.far = dist + 260;
                 camera.updateProjectionMatrix();
@@ -1195,6 +1205,26 @@
             let lockedAngle = null;
             let peak = 0;
             let lastSentAngle = null;
+            let myIndex = null;
+            let lastHitId = null;
+            let gotFirstState = false;
+
+            function reactToHit(hit) {
+                if (!hit || hit.id === lastHitId) return false;
+                lastHitId = hit.id;
+                if (!gotFirstState || myIndex === null) return false;
+                const scored = hit.scorer === myIndex;
+                const wasHit = hit.victim === myIndex;
+                if (!scored && !wasHit) return false;
+                if (navigator.vibrate) navigator.vibrate(scored ? [120, 60, 120, 60, 300] : [600, 100, 200]);
+                document.body.classList.remove('flash-good', 'flash-bad');
+                void document.body.offsetWidth;
+                document.body.classList.add(scored ? 'flash-good' : 'flash-bad');
+                gameStatus.textContent = scored
+                    ? (wasHit ? 'Opponent hit themselves — point to you!' : 'DIRECT HIT! You scored!')
+                    : (hit.scorer === hit.victim ? 'You hit yourself!' : 'You got hit!');
+                return true;
+            }
 
             function setAngle(a) {
                 angle = Math.round(Math.min(90, Math.max(0, a)));
@@ -1326,6 +1356,8 @@
             throwButton.addEventListener('contextmenu', (e) => e.preventDefault());
 
             function updateGameState(s) {
+                const justHit = reactToHit(s.hit);
+                gotFirstState = true;
                 const wasMyTurn = isMyTurn;
                 isMyTurn = !!s.isYourTurn;
                 throwButton.disabled = !isMyTurn;
@@ -1336,7 +1368,7 @@
                 }
                 const wind = Number(s.wind) || 0;
                 const windText = `Wind ${wind > 0 ? '→' : wind < 0 ? '←' : ''} ${Math.abs(wind).toFixed(1)}`;
-                gameStatus.textContent = isMyTurn ? `YOUR TURN · ${windText}` : `Opponent's turn · ${windText}`;
+                if (!justHit) gameStatus.textContent = isMyTurn ? `YOUR TURN · ${windText}` : `Opponent's turn · ${windText}`;
                 if (isMyTurn && !wasMyTurn) {
                     lastSentAngle = null;
                     if (navigator.vibrate) navigator.vibrate([80, 60, 80]);
@@ -1351,6 +1383,7 @@
             onSocketOpen = () => sendMessage({ type: 'controller_connect', gameId: gameIdParam, playerId });
             onSocketMessage = (msg) => {
                 if (msg.type === 'controller_connected') {
+                    myIndex = msg.playerIndex;
                     playerInfo.dataset.name = `PLAYER ${msg.playerIndex + 1}`;
                     playerInfo.textContent = playerInfo.dataset.name;
                     playerInfo.style.color = msg.playerIndex === 0 ? 'var(--p1)' : 'var(--p2)';
